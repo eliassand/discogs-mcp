@@ -74,6 +74,11 @@ const mcpApiHandler = {
     const url = new URL(request.url)
     const baseUrl = `${url.protocol}//${url.host}`
 
+    if (url.pathname === '/relay-registration' && request.method === 'POST') {
+      const id = env.RATE_LIMITER.idFromName('discogs-rate-limiter')
+      return env.RATE_LIMITER.get(id).fetch(request)
+    }
+
     const { server, setContext } = createMcpServer(env, baseUrl, ctx)
 
     const props = (ctx as unknown as { props?: DiscogsUserProps }).props
