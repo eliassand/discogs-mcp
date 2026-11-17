@@ -19,7 +19,7 @@ crons = ["23 1,7,13,19 * * *"]
 # Accepts a single ID or a comma-separated list (e.g. "123,456,789").
 # Empty = no allowlist (open; default for local dev and self-hosters).
 [vars]
-ALLOWED_DISCOGS_USER_ID = ""
+ALLOWED_DISCOGS_USER_ID = "6063891"
 # Optional egress relay for Discogs API calls. Discogs throttles per source IP
 # and Workers share Cloudflare's egress IPs, so the hosted instance routes its
 # calls through a Cloudflare Tunnel to a machine with an IP of its own (see
@@ -57,11 +57,11 @@ new_sqlite_classes = ["DiscogsRateLimiter"]
 # [env.production] below via `npm run deploy:prod`.
 [[kv_namespaces]]
 binding = "MCP_SESSIONS"
-id = "a0bc40f523d54a6ab70fa947ac3daeaf"
+id = "1fc52f6da5774065b008e1bc8c585941"
 
 [[kv_namespaces]]
 binding = "OAUTH_KV"
-id = "e04a5ec5441949ebb6e84281bf6598c3"
+id = "22e7f03873c2447faed3c834cdb4fc7b"
 
 # Production environment
 [env.production]
