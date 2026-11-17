@@ -241,6 +241,7 @@ export class DiscogsRateLimiter implements DurableObject {
   private trippedUntil: number | null = null
   /** Egress relay to send Discogs calls through; null = straight to api.discogs.com. */
   private relay: RelayConfig | null
+  private registration: { origin: string; timestamp: number } | undefined
   /** Relay credentials missing while an origin is set; non-empty means the relay is off by mistake. */
   private missingRelayCredentials: string[]
   /** Times a request fell back from the relay to a direct call. Persisted. */
@@ -248,7 +249,7 @@ export class DiscogsRateLimiter implements DurableObject {
   /** Wall-clock ms of the most recent such fallback; null = none. Persisted. */
   private lastRelayFallbackAt: number | null = null
 
-  constructor(state: DurableObjectState, env: RelayEnv) {
+  constructor(state: DurableObjectState, private readonly env: RelayEnv) {
     this.state = state
     this.relay = relayConfigFrom(env)
     this.missingRelayCredentials = missingRelayCredentials(env)
@@ -258,6 +259,10 @@ export class DiscogsRateLimiter implements DurableObject {
       console.log(this.relay ? `[RL] Egress relay enabled: ${this.relay.origin}` : '[RL] Egress relay off, calling api.discogs.com directly')
     }
     state.blockConcurrencyWhile(async () => {
+      this.registration = await state.storage.get<{ origin: string; timestamp: number }>('relayRegistration')
+      if (this.registration) {
+        this.relay = relayConfigFrom({ ...env, DISCOGS_RELAY_ORIGIN: this.registration.origin })
+      }
       this.relayFallbacks = (await state.storage.get<number>('relayFallbacks')) ?? 0
       this.lastRelayFallbackAt = (await state.storage.get<number>('lastRelayFallbackAt')) ?? null
 
@@ -317,6 +322,9 @@ export class DiscogsRateLimiter implements DurableObject {
   }
 
   async fetch(request: Request): Promise<Response> {
+    if (new URL(request.url).pathname === '/relay-registration') {
+      return this.registerRelay(request)
+    }
     // Debug state endpoint — read-only snapshot, no Discogs call, no body required
     if (new URL(request.url).pathname === '/state') {
       const now = Date.now()
@@ -644,6 +652,39 @@ export class DiscogsRateLimiter implements DurableObject {
     }
   }
 
+  private async registerRelay(request: Request): Promise<Response> {
+    const secret = this.env.RELAY_ACCESS_CLIENT_SECRET?.trim()
+    const origin = request.headers.get('X-Relay-Origin') ?? ''
+    const timestampText = request.headers.get('X-Relay-Timestamp') ?? ''
+    const signature = request.headers.get('X-Relay-Signature') ?? ''
+    const timestamp = Number(timestampText)
+    if (!secret || !this.env.RELAY_ACCESS_CLIENT_ID?.trim() || request.method !== 'POST') {
+      return new Response(null, { status: 404 })
+    }
+    if (!/^https:\/\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.trycloudflare\.com$/.test(origin)
+      || !/^\d{13}$/.test(timestampText) || Math.abs(Date.now() - timestamp) > 60_000
+      || !/^[a-f0-9]{64}$/.test(signature)) {
+      return new Response(null, { status: 400 })
+    }
+    const encoder = new TextEncoder()
+    const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])
+    const bytes = Uint8Array.from(signature.match(/../g) ?? [], (hex) => parseInt(hex, 16))
+    const message = encoder.encode(`discogs-relay-registration/v1\n${origin}\n${timestampText}`)
+    if (!(await crypto.subtle.verify('HMAC', key, bytes, message))) {
+      return new Response(null, { status: 401 })
+    }
+    return this.state.blockConcurrencyWhile(async () => {
+      if (this.registration && timestamp <= this.registration.timestamp) {
+        return new Response(null, { status: 409 })
+      }
+      const registration = { origin, timestamp }
+      await this.state.storage.put('relayRegistration', registration)
+      this.registration = registration
+      this.relay = relayConfigFrom({ ...this.env, DISCOGS_RELAY_ORIGIN: origin })
+      return new Response(null, { status: 204 })
+    })
+  }
+
   /** Count a fallback and persist it, so a restart doesn't erase the evidence. */
   private async recordRelayFallback(): Promise<void> {
     this.relayFallbacks += 1
@@ -656,6 +697,7 @@ export class DiscogsRateLimiter implements DurableObject {
   private async send(req: RateLimiterRequest, relay: RelayConfig | null): Promise<RateLimiterResponse> {
     const response = await fetch(relayTarget(req.url, relay), {
       method: req.method,
+      redirect: relay ? 'manual' : 'follow',
       headers: relayHeaders(req.headers, relay),
       body: req.body ?? undefined,
     })
